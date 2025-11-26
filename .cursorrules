@@ -1,0 +1,91 @@
+Masterplan för App-utveckling (Gratis Hobby-version)
+
+1. Beskrivning av App (Visionen)
+
+Namn: Budget app Hiss-pitch: Få full kontroll av din ekomomi, fullständing koll på alla inkomster och utgifter Målgrupp: Privat bruk (Jag & Familjen).
+Huvudproblem att lösa: Appen ska samla in data från olika källor med inkomster, utgifter och sparande.
+
+2. Översikt av Logiken (Flödet)
+
+Kärn-loop:
+
+Användaren loggar in.
+
+Användaren utför en handling (CRUD - Create, Read, Update, Delete).
+
+Systemet sparar data och ger feedback.
+
+Datamodell (Supabase - Free Tier):
+
+users (Hanteras av Supabase Auth).
+
+[tabell_1] (Din huvuddata).
+
+[tabell_2] (Supportdata).
+
+3. UI/UX (Look and Feel)
+
+Designsystem: Shadcn/ui + Tailwind CSS (Open Source = Gratis).
+Tema: Rent och funktionellt. Mobilanpassat (Responsive).
+Viktiga vyer:
+
+Landningssida: Enkel info + Logga in.
+
+App-vy: Huvudfunktionen.
+
+Inställningar: Hantera konto.
+
+4. Build & Provision (Gratis Infrastruktur)
+
+Lokal miljö:
+
+IDE: Cursor (Gratis-versionen räcker långt, eller VS Code).
+
+Ramverk: React + Vite (Open Source).
+
+Språk: TypeScript.
+
+Hosting (Production):
+
+Frontend: Vercel "Hobby Plan" (Gratis för icke-kommersiella projekt).
+
+Backend/Databas: Supabase "Free Tier".
+
+OBS: Projektet "pausas" efter 1 veckas inaktivitet. Du väcker det enkelt genom att logga in i Supabase igen.
+
+5. Stack & Komponenter
+
+Frontend:
+
+React Router: För navigering.
+
+TanStack Query: För datahämtning.
+
+Lucide React: Gratis ikoner.
+
+Backend (BaaS):
+
+Supabase Client: Direkt koppling till DB.
+
+Supabase Auth: Gratis upp till 50 000 aktiva användare i månaden.
+
+Supabase Storage: Gratis upp till 1 GB filer (t.ex. bilder/kvitton).
+
+6. Säkerhet & Auth
+
+Autentisering: Supabase Auth (Email/Lösenord).
+Auktorisering: RLS (Row Level Security). Detta är inbyggt i databasen och kostar inget extra.
+
+7. Kostnadsstrategi (Zero Cost)
+
+För att hålla projektet till 0 kr/månad:
+
+Databas: Vi håller oss under 500 MB data (vilket är enormt mycket textdata).
+
+Filer: Vi rensar gamla bilder/filer om vi närmar oss 1 GB gränsen.
+
+Hosting: Vi använder Vercels Hobby-plan (Generösa gränser för trafik).
+
+AI-funktioner (Om aktuellt):
+
+Om appen behöver AI (t.ex. läsa kvitton): Vi använder Google Gemini API (via Google AI Studio) som har en generös gratis-nivå, istället för OpenAI som kostar pengar.
