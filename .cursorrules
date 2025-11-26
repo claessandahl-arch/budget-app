@@ -89,3 +89,19 @@ Hosting: Vi använder Vercels Hobby-plan (Generösa gränser för trafik).
 AI-funktioner (Om aktuellt):
 
 Om appen behöver AI (t.ex. läsa kvitton): Vi använder Google Gemini API (via Google AI Studio) som har en generös gratis-nivå, istället för OpenAI som kostar pengar.
+
+8. Git Workflow (VIKTIGT)
+
+1. Committa ALDRIG direkt till `main` - Skapa alltid en separat branch för ändringar.
+
+2. Skapa Pull Requests - Alla ändringar måste gå genom PR-workflow.
+
+3. Auto-merga INTE PRs - Skapa PR:en och STOPPA. Låt användaren granska och merga manuellt.
+
+4. Använd ALDRIG force push - Undvik `git push --force` eller `git push -f`.
+
+5. Hämta senaste ändringar - Kör alltid `git pull` innan du börjar arbeta.
+
+6. Synka ofta - Håll din lokala repo synkad med remote.
+
+7. Verifiera Build - Kör ALLTID `npm run build` lokalt innan push.
