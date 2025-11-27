@@ -25,7 +25,7 @@ export function Login() {
       setError('Fel e-post eller lösenord. Försök igen.')
       setLoading(false)
     } else {
-      navigate('/dashboard')
+      navigate('/app')
     }
   }
 
