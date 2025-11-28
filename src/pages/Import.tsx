@@ -10,7 +10,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Badge } from '@/components/ui/badge'
 import { Separator } from '@/components/ui/separator'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
-import { createTransaction, getImportProfiles, createImportProfile, deleteImportProfile, getTransactions } from '@/lib/api'
+import { createTransaction, getImportProfiles, createImportProfile, updateImportProfile, deleteImportProfile, getTransactions } from '@/lib/api'
 import type { NewTransaction, NewImportProfile } from '@/types/database'
 
 // Typ för rå Excel-data
@@ -57,6 +57,10 @@ export function Import() {
   const [selectedProfileId, setSelectedProfileId] = useState<string>('')
   const [saveDialogOpen, setSaveDialogOpen] = useState(false)
   const [newProfileName, setNewProfileName] = useState('')
+  const [profileNameError, setProfileNameError] = useState<string>('')
+  const [editingProfileId, setEditingProfileId] = useState<string>('')  // Om man redigerar befintlig profil
+  const [saveProfileAction, setSaveProfileAction] = useState<'update' | 'new'>('new')  // Spara som ny eller uppdatera
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)  // Dialog för bekräftelse av borttagning
   
   // Mappning
   const [mapping, setMapping] = useState<ColumnMapping>(DEFAULT_MAPPING)
@@ -80,13 +84,23 @@ export function Import() {
     queryFn: getTransactions,
   })
 
-  // Spara profil mutation
+  // Spara eller uppdatera profil mutation
   const saveProfileMutation = useMutation({
-    mutationFn: (profile: NewImportProfile) => createImportProfile(profile),
+    mutationFn: async (data: { profile: NewImportProfile; profileId?: string }) => {
+      if (data.profileId) {
+        // Uppdatera befintlig profil
+        await updateImportProfile(data.profileId, data.profile)
+      } else {
+        // Skapa ny profil
+        await createImportProfile(data.profile)
+      }
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['import-profiles'] })
       setSaveDialogOpen(false)
       setNewProfileName('')
+      setEditingProfileId('')
+      setProfileNameError('')
     },
   })
 
@@ -197,20 +211,39 @@ export function Import() {
           headerRow: profile.skip_rows, // skip_rows används som headerRow
         }
         setMapping(newMapping)
+        setEditingProfileId(profileId)  // Mark as editing
+        setSaveProfileAction('update')
+        setNewProfileName(profile.name)  // Pre-fill the name
         // Omprocessa data med ny header-rad
         if (rawSheetData.length > 0) {
           processDataWithHeaderRow(rawSheetData, profile.skip_rows)
         }
       }
+    } else {
+      setEditingProfileId('')
+      setSaveProfileAction('new')
     }
   }
 
   // Spara aktuell mappning som profil
   const handleSaveProfile = () => {
+    // Validera profilnamn
     if (!newProfileName.trim()) {
-      alert('Ange ett namn för profilen')
+      setProfileNameError('Ange ett namn för profilen')
       return
     }
+
+    // Kontrollera om namnet redan finns (om det inte är samma profil som vi redigerar)
+    const nameExists = savedProfiles.some(p => 
+      p.name.toLowerCase() === newProfileName.toLowerCase() && p.id !== editingProfileId
+    )
+
+    if (nameExists) {
+      setProfileNameError('Profilnamn redan använt. Välj ett annat namn.')
+      return
+    }
+
+    setProfileNameError('')
 
     const profile: NewImportProfile = {
       name: newProfileName,
@@ -223,7 +256,13 @@ export function Import() {
       skip_rows: mapping.headerRow, // headerRow sparas som skip_rows
     }
 
-    saveProfileMutation.mutate(profile)
+    // Om vi uppdaterar befintlig profil och vill behålla samma namn
+    if (editingProfileId && saveProfileAction === 'update') {
+      saveProfileMutation.mutate({ profile, profileId: editingProfileId })
+    } else {
+      // Skapa ny profil
+      saveProfileMutation.mutate({ profile })
+    }
   }
 
   // Parsa datum från olika format
@@ -487,6 +526,10 @@ export function Import() {
     setImportStep('upload')
     setMapping(DEFAULT_MAPPING)
     setSelectedProfileId('')
+    setEditingProfileId('')
+    setNewProfileName('')
+    setProfileNameError('')
+    setSaveProfileAction('new')
   }
 
   const formatCurrency = (amount: number) => {
@@ -605,12 +648,26 @@ export function Import() {
         <>
           <Card className="bg-white border-slate-200 shadow-sm">
             <CardHeader>
-              <CardTitle className="text-lg text-slate-800">
-                Kolumnmappning - {fileName}
-              </CardTitle>
-              <CardDescription>
-                {rawData.length} rader hittades. Mappa kolumnerna till rätt fält.
-              </CardDescription>
+              <div className="flex items-start justify-between">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <CardTitle className="text-lg text-slate-800">
+                      Kolumnmappning - {fileName}
+                    </CardTitle>
+                    {editingProfileId && (
+                      <Badge className="bg-blue-500">Redigerar profil</Badge>
+                    )}
+                  </div>
+                  <CardDescription>
+                    {rawData.length} rader hittades. Mappa kolumnerna till rätt fält.
+                    {editingProfileId && (
+                      <span className="block mt-1">
+                        Du redigerar: <strong>{newProfileName}</strong>
+                      </span>
+                    )}
+                  </CardDescription>
+                </div>
+              </div>
             </CardHeader>
             <CardContent className="space-y-6">
               {/* Välj sparad profil */}
@@ -632,17 +689,40 @@ export function Import() {
                   </Select>
                 </div>
                 {selectedProfileId && (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => {
-                      if (confirm('Ta bort denna profil?')) {
-                        deleteProfileMutation.mutate(selectedProfileId)
-                      }
-                    }}
-                  >
-                    🗑️ Ta bort
-                  </Button>
+                  <>
+                    <Dialog open={deleteConfirmOpen} onOpenChange={setDeleteConfirmOpen}>
+                      <button
+                        className="px-3 py-1.5 text-sm rounded border border-slate-300 hover:bg-red-50 text-slate-700 flex items-center gap-2"
+                        onClick={() => setDeleteConfirmOpen(true)}
+                      >
+                        🗑️ Ta bort
+                      </button>
+                      <DialogContent className="sm:max-w-md">
+                        <DialogHeader>
+                          <DialogTitle>Ta bort profil</DialogTitle>
+                          <DialogDescription>
+                            Är du säker på att du vill ta bort profilen "{savedProfiles.find(p => p.id === selectedProfileId)?.name}"? 
+                            Den kan inte återställas.
+                          </DialogDescription>
+                        </DialogHeader>
+                        <div className="flex justify-end gap-2">
+                          <Button variant="outline" onClick={() => setDeleteConfirmOpen(false)}>
+                            Avbryt
+                          </Button>
+                          <Button 
+                            variant="destructive"
+                            onClick={() => {
+                              deleteProfileMutation.mutate(selectedProfileId)
+                              setDeleteConfirmOpen(false)
+                            }}
+                            disabled={deleteProfileMutation.isPending}
+                          >
+                            {deleteProfileMutation.isPending ? 'Tar bort...' : 'Ta bort profil'}
+                          </Button>
+                        </div>
+                      </DialogContent>
+                    </Dialog>
+                  </>
                 )}
               </div>
 
@@ -779,23 +859,69 @@ export function Import() {
                   </DialogTrigger>
                   <DialogContent className="sm:max-w-md">
                     <DialogHeader>
-                      <DialogTitle>Spara importprofil</DialogTitle>
+                      <DialogTitle>
+                        {editingProfileId ? 'Uppdatera eller spara som ny profil' : 'Spara importprofil'}
+                      </DialogTitle>
                       <DialogDescription>
-                        Spara denna mappning för att återanvända vid framtida importer
+                        {editingProfileId 
+                          ? 'Välj om du vill uppdatera den befintliga profilen eller skapa en ny'
+                          : 'Spara denna mappning för att återanvända vid framtida importer'
+                        }
                       </DialogDescription>
                     </DialogHeader>
                     <div className="space-y-4">
+                      {/* Om vi redigerar en befintlig profil, visa val mellan uppdatera eller ny */}
+                      {editingProfileId && (
+                        <div className="space-y-3 pb-3 border-b">
+                          <Label className="text-base font-semibold">Vad vill du göra?</Label>
+                          <div className="space-y-2">
+                            <label className="flex items-center gap-3 p-2 border rounded cursor-pointer hover:bg-slate-50" 
+                              onClick={() => setSaveProfileAction('update')}>
+                              <input 
+                                type="radio" 
+                                name="action" 
+                                checked={saveProfileAction === 'update'}
+                                onChange={() => setSaveProfileAction('update')}
+                              />
+                              <span>Uppdatera befintlig profil</span>
+                            </label>
+                            <label className="flex items-center gap-3 p-2 border rounded cursor-pointer hover:bg-slate-50"
+                              onClick={() => setSaveProfileAction('new')}>
+                              <input 
+                                type="radio" 
+                                name="action" 
+                                checked={saveProfileAction === 'new'}
+                                onChange={() => setSaveProfileAction('new')}
+                              />
+                              <span>Spara som ny profil</span>
+                            </label>
+                          </div>
+                        </div>
+                      )}
+
                       <div className="space-y-2">
-                        <Label htmlFor="profile-name">Profilnamn</Label>
+                        <Label htmlFor="profile-name">
+                          {saveProfileAction === 'update' ? 'Profilnamn (oförändrat)' : 'Profilnamn'}
+                        </Label>
                         <Input
                           id="profile-name"
                           placeholder="T.ex. Nordea Privatkonto"
                           value={newProfileName}
-                          onChange={(e) => setNewProfileName(e.target.value)}
+                          onChange={(e) => {
+                            setNewProfileName(e.target.value)
+                            setProfileNameError('')
+                          }}
+                          disabled={!!(editingProfileId && saveProfileAction === 'update')}
                         />
+                        {profileNameError && (
+                          <p className="text-sm text-red-600">{profileNameError}</p>
+                        )}
                       </div>
                       <div className="flex justify-end gap-2">
-                        <Button variant="outline" onClick={() => setSaveDialogOpen(false)}>
+                        <Button variant="outline" onClick={() => {
+                          setSaveDialogOpen(false)
+                          setProfileNameError('')
+                        }}>
                           Avbryt
                         </Button>
                         <Button 
