@@ -12,6 +12,7 @@ import { FixedExpenses } from '@/pages/FixedExpenses'
 import { VariableExpenses } from '@/pages/VariableExpenses'
 import { Savings } from '@/pages/Savings'
 import { Import } from '@/pages/Import'
+import { Admin } from '@/pages/Admin'
 
 function App() {
   return (
@@ -39,6 +40,7 @@ function App() {
               <Route path="variable-expenses" element={<VariableExpenses />} />
               <Route path="savings" element={<Savings />} />
               <Route path="import" element={<Import />} />
+              <Route path="admin" element={<Admin />} />
             </Route>
 
             {/* Legacy redirect */}
