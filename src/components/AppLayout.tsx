@@ -10,6 +10,7 @@ const navItems = [
   { path: '/app/variable-expenses', label: 'Rörliga utgifter', icon: '🛒' },
   { path: '/app/savings', label: 'Sparande', icon: '🐷' },
   { path: '/app/import', label: 'Import', icon: '📥' },
+  { path: '/app/admin', label: 'Admin', icon: '⚙️' },
 ]
 
 export function AppLayout() {

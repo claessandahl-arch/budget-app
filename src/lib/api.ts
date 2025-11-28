@@ -477,3 +477,97 @@ export async function deleteImportProfile(id: string): Promise<void> {
 
   if (error) throw error
 }
+
+// =====================================================
+// ADMIN FUNCTIONS (Bulk operations)
+// =====================================================
+
+export type AdminStats = {
+  transactions: number
+  incomes: number
+  fixedExpenses: number
+  savings: number
+  categories: number
+  importProfiles: number
+}
+
+export async function getAdminStats(): Promise<AdminStats> {
+  const [
+    { count: transactions },
+    { count: incomes },
+    { count: fixedExpenses },
+    { count: savings },
+    { count: categories },
+    { count: importProfiles },
+  ] = await Promise.all([
+    supabase.from('transactions').select('*', { count: 'exact', head: true }),
+    supabase.from('incomes').select('*', { count: 'exact', head: true }),
+    supabase.from('fixed_expenses').select('*', { count: 'exact', head: true }),
+    supabase.from('savings').select('*', { count: 'exact', head: true }),
+    supabase.from('categories').select('*', { count: 'exact', head: true }),
+    supabase.from('import_profiles').select('*', { count: 'exact', head: true }),
+  ])
+
+  return {
+    transactions: transactions || 0,
+    incomes: incomes || 0,
+    fixedExpenses: fixedExpenses || 0,
+    savings: savings || 0,
+    categories: categories || 0,
+    importProfiles: importProfiles || 0,
+  }
+}
+
+export async function deleteAllTransactions(): Promise<void> {
+  const { error } = await supabase
+    .from('transactions')
+    .delete()
+    .neq('id', '00000000-0000-0000-0000-000000000000') // Delete all (workaround for Supabase)
+
+  if (error) throw error
+}
+
+export async function deleteAllImportProfiles(): Promise<void> {
+  const { error } = await supabase
+    .from('import_profiles')
+    .delete()
+    .neq('id', '00000000-0000-0000-0000-000000000000')
+
+  if (error) throw error
+}
+
+export async function deleteAllCategories(): Promise<void> {
+  const { error } = await supabase
+    .from('categories')
+    .delete()
+    .neq('id', '00000000-0000-0000-0000-000000000000')
+
+  if (error) throw error
+}
+
+export async function deleteAllIncomes(): Promise<void> {
+  const { error } = await supabase
+    .from('incomes')
+    .delete()
+    .neq('id', '00000000-0000-0000-0000-000000000000')
+
+  if (error) throw error
+}
+
+export async function deleteAllFixedExpenses(): Promise<void> {
+  const { error } = await supabase
+    .from('fixed_expenses')
+    .delete()
+    .neq('id', '00000000-0000-0000-0000-000000000000')
+
+  if (error) throw error
+}
+
+export async function deleteAllSavings(): Promise<void> {
+  const { error } = await supabase
+    .from('savings')
+    .delete()
+    .neq('id', '00000000-0000-0000-0000-000000000000')
+
+  if (error) throw error
+}
