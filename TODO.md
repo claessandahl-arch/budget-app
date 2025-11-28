@@ -14,6 +14,12 @@
 - [ ] Filtrera på datumintervall
 - [ ] Filtrera på belopp (min/max)
 
+### 📥 Förbättrad Import - Transaktionsklassificering
+- [ ] Manuell klassificering vid import (välj typ per rad)
+- [ ] Stöd för att importera till: Rörliga utgifter, Inkomster, Fasta utgifter, Sparande
+- [ ] Tilldela kategori direkt vid import
+- [ ] Auto-föreslå typ baserat på belopp (+/-)
+
 ### 🔧 Admin-läge
 - [ ] Separat Admin-sida (`/app/admin`)
 - [ ] Radera alla transaktioner (med bekräftelse)
@@ -64,6 +70,12 @@
 - [ ] Läsa kvittotext automatiskt
 - [ ] Föreslå kategori baserat på beskrivning
 - [ ] Smart duplicering (liknande transaktioner)
+
+### 🧠 Smart Import - Auto-klassificering (Fas 2)
+- [ ] Keyword-baserad auto-klassificering (LÖN → Inkomst, SPOTIFY → Fast utgift)
+- [ ] Lär sig från användarens tidigare klassificeringar
+- [ ] Föreslå typ baserat på historik
+- [ ] Regler per importprofil
 
 ### 🔔 Notifikationer
 - [ ] Påminnelse om fasta utgifter (due_day)

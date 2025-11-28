@@ -10,11 +10,22 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Badge } from '@/components/ui/badge'
 import { Separator } from '@/components/ui/separator'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
-import { createTransaction, getImportProfiles, createImportProfile, updateImportProfile, deleteImportProfile, getTransactions } from '@/lib/api'
-import type { NewTransaction, NewImportProfile } from '@/types/database'
+import { createTransaction, createIncome, createFixedExpense, createSaving, getImportProfiles, createImportProfile, updateImportProfile, deleteImportProfile, getTransactions } from '@/lib/api'
+import type { NewTransaction, NewImportProfile, NewIncome, NewFixedExpense, NewSaving } from '@/types/database'
 
 // Typ för rå Excel-data
 type RawRow = Record<string, unknown>
+
+// Typ för vart transaktionen ska importeras
+type ImportTargetType = 'variable' | 'income' | 'fixed' | 'savings' | 'skip'
+
+const TARGET_TYPE_LABELS: Record<ImportTargetType, { label: string; emoji: string; color: string }> = {
+  variable: { label: 'Rörlig utgift', emoji: '🛒', color: 'bg-orange-100 text-orange-700' },
+  income: { label: 'Inkomst', emoji: '💰', color: 'bg-green-100 text-green-700' },
+  fixed: { label: 'Fast utgift', emoji: '🏠', color: 'bg-blue-100 text-blue-700' },
+  savings: { label: 'Sparande', emoji: '🐷', color: 'bg-purple-100 text-purple-700' },
+  skip: { label: 'Hoppa över', emoji: '⏭️', color: 'bg-slate-100 text-slate-500' },
+}
 
 type ColumnMapping = {
   name: string
@@ -35,6 +46,7 @@ type ParsedTransaction = {
   isValid: boolean
   errors: string[]
   isDuplicate?: boolean  // Om transaktionen redan finns i databasen
+  targetType: ImportTargetType  // Vart ska transaktionen importeras
 }
 
 const DEFAULT_MAPPING: ColumnMapping = {
@@ -418,6 +430,9 @@ export function Import() {
       // Kontrollera om transaktionen redan finns
       const isDuplicate = date && amount ? checkDuplicate(date, amount, description) : false
       
+      // Auto-föreslå typ baserat på belopp (positiv = inkomst, negativ = rörlig utgift)
+      const suggestedType: ImportTargetType = amount && amount > 0 ? 'income' : 'variable'
+      
       return {
         date: date || '',
         description,
@@ -426,6 +441,7 @@ export function Import() {
         isValid: errors.length === 0,
         errors,
         isDuplicate,
+        targetType: suggestedType,
       }
     })
 
@@ -453,6 +469,39 @@ export function Import() {
     })
   }
 
+  // Ändra targetType för en transaktion
+  const changeTargetType = (index: number, newType: ImportTargetType) => {
+    setParsedTransactions(prev => {
+      const updated = [...prev]
+      updated[index] = { ...updated[index], targetType: newType }
+      return updated
+    })
+    // Om man väljer 'skip', avmarkera för import
+    if (newType === 'skip') {
+      setSelectedForImport(prev => {
+        const next = new Set(prev)
+        next.delete(index)
+        return next
+      })
+    }
+  }
+
+  // Bulk-ändra targetType för alla valda
+  const bulkChangeTargetType = (newType: ImportTargetType) => {
+    setParsedTransactions(prev => {
+      return prev.map((t, i) => {
+        if (selectedForImport.has(i) && t.isValid && !t.isDuplicate) {
+          return { ...t, targetType: newType }
+        }
+        return t
+      })
+    })
+    // Om man väljer 'skip', avmarkera alla för import
+    if (newType === 'skip') {
+      setSelectedForImport(new Set())
+    }
+  }
+
   // Välj/avvälj alla
   const toggleAllTransactions = (selectAll: boolean) => {
     if (selectAll) {
@@ -466,10 +515,11 @@ export function Import() {
   // Import mutation
   const importMutation = useMutation({
     mutationFn: async (transactions: ParsedTransaction[]) => {
-      // Importera bara valda transaktioner som INTE är dubbletter
+      // Importera bara valda transaktioner som INTE är dubbletter och inte 'skip'
       const selectedTransactions = transactions.filter((t, i) => 
         t.isValid && 
         !t.isDuplicate && 
+        t.targetType !== 'skip' &&
         selectedForImport.has(i)
       )
       
@@ -480,23 +530,86 @@ export function Import() {
           ? mapping.name 
           : fileName.split('.')[0] // Ta bort filändelse
       
+      // Räkna per typ
+      const counts = { variable: 0, income: 0, fixed: 0, savings: 0 }
+      
       for (const t of selectedTransactions) {
-        const newTransaction: NewTransaction = {
-          date: t.date,
-          description: t.description,
-          amount: Math.abs(t.amount),
-          type: t.amount < 0 ? 'expense' : 'income',
-          category_id: null,
-          notes: `Importerad från ${profileName}`,
+        const absAmount = Math.abs(t.amount)
+        const notes = `Importerad från ${profileName}`
+        
+        switch (t.targetType) {
+          case 'variable':
+            // Rörlig utgift/inkomst → transactions-tabellen
+            const newTransaction: NewTransaction = {
+              date: t.date,
+              description: t.description,
+              amount: absAmount,
+              type: t.amount < 0 ? 'expense' : 'income',
+              category_id: null,
+              notes,
+            }
+            await createTransaction(newTransaction)
+            counts.variable++
+            break
+            
+          case 'income':
+            // Inkomst → incomes-tabellen (månadsvis)
+            const newIncome: NewIncome = {
+              name: t.description,
+              amount: absAmount,
+              notes: `${notes} (${t.date})`,
+              is_active: true,
+            }
+            await createIncome(newIncome)
+            counts.income++
+            break
+            
+          case 'fixed':
+            // Fast utgift → fixed_expenses-tabellen
+            const newFixedExpense: NewFixedExpense = {
+              name: t.description,
+              amount: absAmount,
+              budget: absAmount, // Default: budget = faktiskt belopp
+              notes: `${notes} (${t.date})`,
+              is_active: true,
+            }
+            await createFixedExpense(newFixedExpense)
+            counts.fixed++
+            break
+            
+          case 'savings':
+            // Sparande → savings-tabellen
+            const newSaving: NewSaving = {
+              name: t.description,
+              amount: absAmount,
+              type: 'short', // Default till kortfristigt sparande
+              notes: `${notes} (${t.date})`,
+              is_active: true,
+            }
+            await createSaving(newSaving)
+            counts.savings++
+            break
         }
-        await createTransaction(newTransaction)
       }
       
-      return selectedTransactions.length
+      return counts
     },
-    onSuccess: (count) => {
+    onSuccess: (counts) => {
+      // Invalidera alla relevanta queries
       queryClient.invalidateQueries({ queryKey: ['transactions'] })
-      alert(`${count} transaktioner importerade!`)
+      queryClient.invalidateQueries({ queryKey: ['incomes'] })
+      queryClient.invalidateQueries({ queryKey: ['fixed-expenses'] })
+      queryClient.invalidateQueries({ queryKey: ['savings'] })
+      
+      // Skapa sammanfattning
+      const parts = []
+      if (counts.variable > 0) parts.push(`${counts.variable} rörliga utgifter`)
+      if (counts.income > 0) parts.push(`${counts.income} inkomster`)
+      if (counts.fixed > 0) parts.push(`${counts.fixed} fasta utgifter`)
+      if (counts.savings > 0) parts.push(`${counts.savings} sparande`)
+      
+      const total = counts.variable + counts.income + counts.fixed + counts.savings
+      alert(`${total} poster importerade!\n\n${parts.join('\n')}`)
       setImportStep('done')
     },
     onError: (error) => {
@@ -1040,8 +1153,8 @@ export function Import() {
               </Card>
             </div>
 
-            {/* Välj alla / Avmarkera alla */}
-            <div className="flex items-center gap-4 py-2 border-b border-slate-200">
+            {/* Välj alla / Avmarkera alla + Bulk typ-ändring */}
+            <div className="flex flex-wrap items-center gap-4 py-2 border-b border-slate-200">
               <Button 
                 variant="outline" 
                 size="sm"
@@ -1056,9 +1169,20 @@ export function Import() {
               >
                 ⬜ Avmarkera alla
               </Button>
-              <span className="text-sm text-slate-500">
-                💡 Avmarkera överföringar (t.ex. AMERICAN EXPRESS) för att undvika dubbelräkning
-              </span>
+              <Separator orientation="vertical" className="h-6" />
+              <span className="text-sm text-slate-600 font-medium">Ändra valda till:</span>
+              {(['variable', 'income', 'fixed', 'savings'] as ImportTargetType[]).map(type => (
+                <Button
+                  key={type}
+                  variant="outline"
+                  size="sm"
+                  onClick={() => bulkChangeTargetType(type)}
+                  disabled={selectedForImport.size === 0}
+                  className={`text-xs ${TARGET_TYPE_LABELS[type].color}`}
+                >
+                  {TARGET_TYPE_LABELS[type].emoji} {TARGET_TYPE_LABELS[type].label}
+                </Button>
+              ))}
             </div>
 
             {/* Transaktionslista */}
@@ -1070,6 +1194,7 @@ export function Import() {
                     <TableHead>Datum</TableHead>
                     <TableHead>Beskrivning</TableHead>
                     <TableHead className="text-right">Belopp</TableHead>
+                    <TableHead className="w-40">Importera som</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -1123,6 +1248,29 @@ export function Import() {
                         t.amount < 0 ? 'text-red-600' : 'text-teal-600'
                       }`}>
                         {formatCurrency(t.amount)}
+                      </TableCell>
+                      <TableCell onClick={(e) => e.stopPropagation()}>
+                        {t.isValid && !t.isDuplicate ? (
+                          <Select
+                            value={t.targetType}
+                            onValueChange={(v) => changeTargetType(idx, v as ImportTargetType)}
+                          >
+                            <SelectTrigger className={`h-8 text-xs ${TARGET_TYPE_LABELS[t.targetType].color}`}>
+                              <SelectValue>
+                                {TARGET_TYPE_LABELS[t.targetType].emoji} {TARGET_TYPE_LABELS[t.targetType].label}
+                              </SelectValue>
+                            </SelectTrigger>
+                            <SelectContent>
+                              {(['variable', 'income', 'fixed', 'savings', 'skip'] as ImportTargetType[]).map(type => (
+                                <SelectItem key={type} value={type}>
+                                  {TARGET_TYPE_LABELS[type].emoji} {TARGET_TYPE_LABELS[type].label}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        ) : (
+                          <span className="text-slate-400 text-xs">-</span>
+                        )}
                       </TableCell>
                     </TableRow>
                     )
