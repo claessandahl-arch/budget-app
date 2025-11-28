@@ -10,7 +10,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Badge } from '@/components/ui/badge'
 import { Separator } from '@/components/ui/separator'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
-import { createTransaction, getImportProfiles, createImportProfile, deleteImportProfile } from '@/lib/api'
+import { createTransaction, getImportProfiles, createImportProfile, deleteImportProfile, getTransactions } from '@/lib/api'
 import type { NewTransaction, NewImportProfile } from '@/types/database'
 
 // Typ för rå Excel-data
@@ -34,6 +34,7 @@ type ParsedTransaction = {
   rawRow: RawRow
   isValid: boolean
   errors: string[]
+  isDuplicate?: boolean  // Om transaktionen redan finns i databasen
 }
 
 const DEFAULT_MAPPING: ColumnMapping = {
@@ -71,6 +72,12 @@ export function Import() {
   const { data: savedProfiles = [] } = useQuery({
     queryKey: ['import-profiles'],
     queryFn: getImportProfiles,
+  })
+
+  // Hämta befintliga transaktioner för dubblettkontroll
+  const { data: existingTransactions = [] } = useQuery({
+    queryKey: ['transactions'],
+    queryFn: getTransactions,
   })
 
   // Spara profil mutation
@@ -248,11 +255,31 @@ export function Import() {
         }
       }
 
+      // MM/DD/YYYY format (American Express, etc.)
+      if (format === 'MM/DD/YYYY') {
+        const match = cleaned.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/)
+        if (match) {
+          const month = match[1].padStart(2, '0')
+          const day = match[2].padStart(2, '0')
+          const year = match[3]
+          return `${year}-${month}-${day}`
+        }
+      }
+
       // Försök parsa som Excel-serienummer
       const num = parseFloat(cleaned)
       if (!isNaN(num) && num > 40000 && num < 50000) {
         const date = new Date((num - 25569) * 86400 * 1000)
         return date.toISOString().split('T')[0]
+      }
+
+      // Försök parsa med JavaScript Date (hanterar flera format)
+      const jsDate = new Date(cleaned)
+      if (!isNaN(jsDate.getTime())) {
+        // Kontrollera att datumet är rimligt (inte default 1970)
+        if (jsDate.getFullYear() > 2000 && jsDate.getFullYear() < 2100) {
+          return jsDate.toISOString().split('T')[0]
+        }
       }
       
       return null
@@ -286,6 +313,35 @@ export function Import() {
     }
   }
 
+  // Kontrollera om en transaktion redan finns
+  const checkDuplicate = (date: string, amount: number, description: string): boolean => {
+    if (!date || !amount) return false
+    
+    const normalizedDescription = description.trim().toLowerCase()
+    const normalizedAmount = Math.abs(amount)
+    
+    return existingTransactions.some(existing => {
+      // Jämför datum (exakt match)
+      if (existing.date !== date) return false
+      
+      // Jämför belopp (tolerans på 0.01 för avrundningsfel)
+      if (Math.abs(Math.abs(Number(existing.amount)) - normalizedAmount) > 0.01) return false
+      
+      // Jämför beskrivning (normaliserad, delvis match)
+      const existingDesc = (existing.description || '').trim().toLowerCase()
+      // Antingen exakt match eller om en beskrivning innehåller den andra
+      if (existingDesc === normalizedDescription) return true
+      if (existingDesc.includes(normalizedDescription) || normalizedDescription.includes(existingDesc)) {
+        // Om beskrivningarna är lika nog (minst 80% match), räkna som dubblett
+        const longer = existingDesc.length > normalizedDescription.length ? existingDesc : normalizedDescription
+        const shorter = existingDesc.length > normalizedDescription.length ? normalizedDescription : existingDesc
+        if (shorter.length / longer.length > 0.8) return true
+      }
+      
+      return false
+    })
+  }
+
   // Förhandsgranska mappning
   const handlePreview = () => {
     if (!mapping.dateColumn || !mapping.descriptionColumn || !mapping.amountColumn) {
@@ -297,15 +353,31 @@ export function Import() {
       const errors: string[] = []
       
       const dateRaw = row[mapping.dateColumn]
-      const date = parseDate(String(dateRaw || ''), mapping.dateFormat)
+      let date = parseDate(String(dateRaw || ''), mapping.dateFormat)
+      
+      // Om datumformat inte matchade, försök auto-detektera
+      if (!date && dateRaw) {
+        // Försök olika format automatiskt
+        const formats = ['MM/DD/YYYY', 'DD/MM/YYYY', 'YYYY-MM-DD', 'DD.MM.YYYY']
+        for (const fmt of formats) {
+          date = parseDate(String(dateRaw), fmt)
+          if (date) break
+        }
+      }
+      
       if (!date) errors.push(`Ogiltigt datum: ${dateRaw}`)
       
       const description = String(row[mapping.descriptionColumn] || '').trim()
       if (!description) errors.push('Saknar beskrivning')
       
       const amountRaw = row[mapping.amountColumn]
-      const amount = parseAmount(amountRaw, mapping.invertAmount)
+      // För kreditkort är beloppen oftast positiva men ska vara negativa utgifter
+      const shouldInvert = mapping.sourceType === 'creditcard' || mapping.invertAmount
+      const amount = parseAmount(amountRaw, shouldInvert)
       if (amount === null) errors.push(`Ogiltigt belopp: ${amountRaw}`)
+      
+      // Kontrollera om transaktionen redan finns
+      const isDuplicate = date && amount ? checkDuplicate(date, amount, description) : false
       
       return {
         date: date || '',
@@ -314,12 +386,17 @@ export function Import() {
         rawRow: row,
         isValid: errors.length === 0,
         errors,
+        isDuplicate,
       }
     })
 
     setParsedTransactions(parsed)
-    // Förvälj alla giltiga transaktioner
-    const validIndices = new Set(parsed.map((t, i) => t.isValid ? i : -1).filter(i => i >= 0))
+    // Förvälj alla giltiga transaktioner som INTE är dubbletter
+    const validIndices = new Set(
+      parsed
+        .map((t, i) => (t.isValid && !t.isDuplicate) ? i : -1)
+        .filter(i => i >= 0)
+    )
     setSelectedForImport(validIndices)
     setImportStep('preview')
   }
@@ -350,8 +427,19 @@ export function Import() {
   // Import mutation
   const importMutation = useMutation({
     mutationFn: async (transactions: ParsedTransaction[]) => {
-      // Importera bara valda transaktioner
-      const selectedTransactions = transactions.filter((t, i) => t.isValid && selectedForImport.has(i))
+      // Importera bara valda transaktioner som INTE är dubbletter
+      const selectedTransactions = transactions.filter((t, i) => 
+        t.isValid && 
+        !t.isDuplicate && 
+        selectedForImport.has(i)
+      )
+      
+      // Hämta profilnamn om en profil är vald, annars använd mapping.name eller filnamn
+      const profileName = selectedProfileId 
+        ? savedProfiles.find(p => p.id === selectedProfileId)?.name 
+        : mapping.name !== 'Ny profil' 
+          ? mapping.name 
+          : fileName.split('.')[0] // Ta bort filändelse
       
       for (const t of selectedTransactions) {
         const newTransaction: NewTransaction = {
@@ -360,7 +448,7 @@ export function Import() {
           amount: Math.abs(t.amount),
           type: t.amount < 0 ? 'expense' : 'income',
           category_id: null,
-          notes: `Importerad från ${fileName}`,
+          notes: `Importerad från ${profileName}`,
         }
         await createTransaction(newTransaction)
       }
@@ -562,12 +650,12 @@ export function Import() {
 
               {/* Mappning */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-<div className="space-y-2">
-                <Label>Datum-kolumn *</Label>
-                <Select 
-                  value={mapping.dateColumn || undefined} 
-                  onValueChange={(v) => setMapping({...mapping, dateColumn: v})}
-                >
+                <div className="space-y-2">
+                  <Label>Datum-kolumn *</Label>
+                  <Select 
+                    value={mapping.dateColumn || undefined} 
+                    onValueChange={(v) => setMapping({...mapping, dateColumn: v || ''})}
+                  >
                   <SelectTrigger>
                     <SelectValue placeholder="Välj kolumn..." />
                   </SelectTrigger>
@@ -579,12 +667,12 @@ export function Import() {
                 </Select>
               </div>
 
-              <div className="space-y-2">
-                <Label>Beskrivning-kolumn *</Label>
-                <Select 
-                  value={mapping.descriptionColumn || undefined} 
-                  onValueChange={(v) => setMapping({...mapping, descriptionColumn: v})}
-                >
+                <div className="space-y-2">
+                  <Label>Beskrivning-kolumn *</Label>
+                  <Select 
+                    value={mapping.descriptionColumn || undefined} 
+                    onValueChange={(v) => setMapping({...mapping, descriptionColumn: v || ''})}
+                  >
                   <SelectTrigger>
                     <SelectValue placeholder="Välj kolumn..." />
                   </SelectTrigger>
@@ -596,12 +684,12 @@ export function Import() {
                 </Select>
               </div>
 
-              <div className="space-y-2">
-                <Label>Belopp-kolumn *</Label>
-                <Select 
-                  value={mapping.amountColumn || undefined} 
-                  onValueChange={(v) => setMapping({...mapping, amountColumn: v})}
-                >
+                <div className="space-y-2">
+                  <Label>Belopp-kolumn *</Label>
+                  <Select 
+                    value={mapping.amountColumn || undefined} 
+                    onValueChange={(v) => setMapping({...mapping, amountColumn: v || ''})}
+                  >
                   <SelectTrigger>
                     <SelectValue placeholder="Välj kolumn..." />
                   </SelectTrigger>
@@ -644,6 +732,7 @@ export function Import() {
                       <SelectItem value="YYYY-MM-DD">2024-01-15</SelectItem>
                       <SelectItem value="DD/MM/YYYY">15/01/2024</SelectItem>
                       <SelectItem value="DD.MM.YYYY">15.01.2024</SelectItem>
+                      <SelectItem value="MM/DD/YYYY">01/15/2024 (US format)</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
@@ -777,12 +866,17 @@ export function Import() {
       {/* Steg 3: Förhandsgranska */}
       {importStep === 'preview' && (
         <Card className="bg-white border-slate-200 shadow-sm">
-          <CardHeader>
-            <CardTitle className="text-lg text-slate-800">Förhandsgranska import</CardTitle>
-            <CardDescription>
-              {selectedForImport.size} av {parsedTransactions.filter(t => t.isValid).length} giltiga transaktioner valda
-            </CardDescription>
-          </CardHeader>
+            <CardHeader>
+              <CardTitle className="text-lg text-slate-800">Förhandsgranska import</CardTitle>
+              <CardDescription>
+                {selectedForImport.size} av {parsedTransactions.filter(t => t.isValid && !t.isDuplicate).length} nya transaktioner valda
+                {parsedTransactions.filter(t => t.isDuplicate).length > 0 && (
+                  <span className="ml-2 text-orange-600">
+                    ({parsedTransactions.filter(t => t.isDuplicate).length} dubbletter hoppas över)
+                  </span>
+                )}
+              </CardDescription>
+            </CardHeader>
           <CardContent className="space-y-4">
             {/* Summering - visar bara valda */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -853,27 +947,39 @@ export function Import() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {parsedTransactions.map((t, idx) => (
+                  {parsedTransactions.map((t, idx) => {
+                    // Skapa unik key med index + datum + belopp för att undvika duplicates
+                    const uniqueKey = `${idx}-${t.date}-${t.amount}-${t.description?.substring(0, 20)}`
+                    const isDisabled = !t.isValid || t.isDuplicate
+                    return (
                     <TableRow 
-                      key={idx} 
-                      className={`cursor-pointer transition-colors ${
+                      key={uniqueKey} 
+                      className={`transition-colors ${
                         !t.isValid 
                           ? 'bg-red-50 opacity-50' 
-                          : selectedForImport.has(idx)
-                            ? 'bg-white hover:bg-slate-50'
-                            : 'bg-slate-100 opacity-60'
+                          : t.isDuplicate
+                            ? 'bg-orange-50 opacity-75'
+                            : selectedForImport.has(idx)
+                              ? 'bg-white hover:bg-slate-50 cursor-pointer'
+                              : 'bg-slate-100 opacity-60 cursor-pointer'
                       }`}
-                      onClick={() => t.isValid && toggleTransaction(idx)}
+                      onClick={() => !isDisabled && toggleTransaction(idx)}
                     >
                       <TableCell>
                         {t.isValid ? (
-                          <input
-                            type="checkbox"
-                            checked={selectedForImport.has(idx)}
-                            onChange={() => toggleTransaction(idx)}
-                            onClick={(e) => e.stopPropagation()}
-                            className="size-4 rounded border-slate-300"
-                          />
+                          t.isDuplicate ? (
+                            <Badge variant="outline" className="bg-orange-100 border-orange-300 text-orange-700" title="Denna transaktion finns redan i databasen">
+                              🔄 Dubblett
+                            </Badge>
+                          ) : (
+                            <input
+                              type="checkbox"
+                              checked={selectedForImport.has(idx)}
+                              onChange={() => toggleTransaction(idx)}
+                              onClick={(e) => e.stopPropagation()}
+                              className="size-4 rounded border-slate-300"
+                            />
+                          )
                         ) : (
                           <Badge variant="destructive" title={t.errors.join(', ')}>
                             ✗
@@ -883,7 +989,7 @@ export function Import() {
                       <TableCell>{t.date || '-'}</TableCell>
                       <TableCell className="max-w-xs truncate">
                         {t.description}
-                        {!selectedForImport.has(idx) && t.isValid && (
+                        {!selectedForImport.has(idx) && t.isValid && !t.isDuplicate && (
                           <Badge variant="outline" className="ml-2 text-xs">Hoppas över</Badge>
                         )}
                       </TableCell>
@@ -893,7 +999,8 @@ export function Import() {
                         {formatCurrency(t.amount)}
                       </TableCell>
                     </TableRow>
-                  ))}
+                    )
+                  })}
                 </TableBody>
               </Table>
             </div>
@@ -909,7 +1016,7 @@ export function Import() {
               >
                 {importMutation.isPending 
                   ? 'Importerar...' 
-                  : `Importera ${selectedForImport.size} transaktioner`
+                  : `Importera ${selectedForImport.size} nya transaktioner`
                 }
               </Button>
             </div>
