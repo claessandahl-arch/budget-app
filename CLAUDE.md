@@ -139,8 +139,21 @@ Uses Radix UI primitives via Shadcn/ui:
 The Excel import functionality (`src/pages/Import.tsx`):
 - Uses `xlsx` library to parse Excel/CSV files
 - Supports saved import profiles for column mapping
-- Detects duplicates based on date + description + amount
-- Allows profile names and default profile selection
+- **Classification**: Each row can be classified as:
+  - `variable` → transactions table
+  - `income` → incomes table  
+  - `fixed` → fixed_expenses table
+  - `savings` → savings table
+  - `skip` → excluded from import
+- **Auto-suggestion**: Positive amounts default to 'income', negative to 'variable'
+- **Global duplicate detection**: Checks ALL tables (transactions, incomes, fixed_expenses, savings)
+- **Match actions**: When duplicate found, user can Update/Create new/Skip
+
+### Known Limitation (Fas 2)
+The current data model treats `incomes`, `fixed_expenses`, `savings` as **definitions** (one row per recurring item), not **occurrences** (one row per payment). This means:
+- Importing the same expense from October AND November creates duplicates if amounts differ
+- Electricity bills that vary monthly create multiple rows
+- Solution: Implement occurrence tables (`fixed_expense_payments`, `income_payments`, `saving_payments`) - see TODO.md "Fas 2"
 
 ## Language & Localization
 
