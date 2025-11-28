@@ -10,8 +10,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Badge } from '@/components/ui/badge'
 import { Separator } from '@/components/ui/separator'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
-import { createTransaction, createIncome, createFixedExpense, createSaving, getImportProfiles, createImportProfile, updateImportProfile, deleteImportProfile, getTransactions } from '@/lib/api'
-import type { NewTransaction, NewImportProfile, NewIncome, NewFixedExpense, NewSaving } from '@/types/database'
+import { createTransaction, createIncome, createFixedExpense, createSaving, getImportProfiles, createImportProfile, updateImportProfile, deleteImportProfile, getTransactions, getFixedExpenses, updateFixedExpense, getIncomes, getSavings, updateIncome, updateSaving } from '@/lib/api'
+import type { NewTransaction, NewImportProfile, NewIncome, NewFixedExpense, NewSaving, FixedExpense, Income, Saving } from '@/types/database'
 
 // Typ för rå Excel-data
 type RawRow = Record<string, unknown>
@@ -38,6 +38,9 @@ type ColumnMapping = {
   headerRow: number  // Vilken rad innehåller kolumnnamnen (0-baserat)
 }
 
+// Typ för vad som ska göras med matchande post
+type MatchAction = 'update' | 'create' | 'skip'
+
 type ParsedTransaction = {
   date: string
   description: string
@@ -45,8 +48,18 @@ type ParsedTransaction = {
   rawRow: RawRow
   isValid: boolean
   errors: string[]
-  isDuplicate?: boolean  // Om transaktionen redan finns i databasen
+  isDuplicate?: boolean  // Om raden redan finns i någon tabell
+  duplicateType?: 'transaction' | 'income' | 'fixed' | 'savings'  // Vilken tabell den hittades i
   targetType: ImportTargetType  // Vart ska transaktionen importeras
+  // Matchning för fasta utgifter
+  matchingFixedExpense?: FixedExpense
+  fixedExpenseAction?: MatchAction
+  // Matchning för inkomster
+  matchingIncome?: Income
+  incomeAction?: MatchAction
+  // Matchning för sparanden
+  matchingSaving?: Saving
+  savingAction?: MatchAction
 }
 
 const DEFAULT_MAPPING: ColumnMapping = {
@@ -94,6 +107,24 @@ export function Import() {
   const { data: existingTransactions = [] } = useQuery({
     queryKey: ['transactions'],
     queryFn: getTransactions,
+  })
+
+  // Hämta befintliga fasta utgifter för matchning
+  const { data: existingFixedExpenses = [] } = useQuery({
+    queryKey: ['fixed-expenses'],
+    queryFn: getFixedExpenses,
+  })
+
+  // Hämta befintliga inkomster för matchning
+  const { data: existingIncomes = [] } = useQuery({
+    queryKey: ['incomes'],
+    queryFn: getIncomes,
+  })
+
+  // Hämta befintliga sparanden för matchning
+  const { data: existingSavings = [] } = useQuery({
+    queryKey: ['savings'],
+    queryFn: getSavings,
   })
 
   // Spara eller uppdatera profil mutation
@@ -364,8 +395,8 @@ export function Import() {
     }
   }
 
-  // Kontrollera om en transaktion redan finns
-  const checkDuplicate = (date: string, amount: number, description: string): boolean => {
+  // Kontrollera om en transaktion redan finns (i transactions-tabellen)
+  const checkDuplicateTransaction = (date: string, amount: number, description: string): boolean => {
     if (!date || !amount) return false
     
     const normalizedDescription = description.trim().toLowerCase()
@@ -391,6 +422,176 @@ export function Import() {
       
       return false
     })
+  }
+
+  // Kontrollera om en rad redan finns i NÅGON tabell (transactions, incomes, fixed_expenses, savings)
+  // Returnerar vilken typ av dubblett det är, eller null om ingen dubblett
+  const checkDuplicateAnywhere = (date: string, amount: number, description: string): {
+    isDuplicate: boolean
+    duplicateType?: 'transaction' | 'income' | 'fixed' | 'savings'
+    matchingRecord?: unknown
+  } => {
+    if (!date || !amount) return { isDuplicate: false }
+    
+    const normalizedDesc = description.trim().toLowerCase()
+    const absAmount = Math.abs(amount)
+    
+    // 1. Kolla transactions (med datum + belopp + beskrivning)
+    if (checkDuplicateTransaction(date, amount, description)) {
+      return { isDuplicate: true, duplicateType: 'transaction' }
+    }
+    
+    // 2. Kolla incomes (namn + belopp, ignorera datum - det är månadsvis)
+    const matchingIncome = existingIncomes.find(inc => {
+      const incName = inc.name.trim().toLowerCase()
+      const amountMatch = Math.abs(inc.amount - absAmount) < 0.01
+      // Exakt match eller partial match på namn + exakt belopp
+      return amountMatch && (
+        incName === normalizedDesc ||
+        incName.includes(normalizedDesc) ||
+        normalizedDesc.includes(incName)
+      )
+    })
+    if (matchingIncome) {
+      return { isDuplicate: true, duplicateType: 'income', matchingRecord: matchingIncome }
+    }
+    
+    // 3. Kolla fixed_expenses (namn + belopp)
+    const matchingFixed = existingFixedExpenses.find(fe => {
+      const feName = fe.name.trim().toLowerCase()
+      const amountMatch = Math.abs(fe.amount - absAmount) < 0.01
+      return amountMatch && (
+        feName === normalizedDesc ||
+        feName.includes(normalizedDesc) ||
+        normalizedDesc.includes(feName)
+      )
+    })
+    if (matchingFixed) {
+      return { isDuplicate: true, duplicateType: 'fixed', matchingRecord: matchingFixed }
+    }
+    
+    // 4. Kolla savings (namn + belopp)
+    const matchingSaving = existingSavings.find(sav => {
+      const savName = sav.name.trim().toLowerCase()
+      const amountMatch = Math.abs(sav.amount - absAmount) < 0.01
+      return amountMatch && (
+        savName === normalizedDesc ||
+        savName.includes(normalizedDesc) ||
+        normalizedDesc.includes(savName)
+      )
+    })
+    if (matchingSaving) {
+      return { isDuplicate: true, duplicateType: 'savings', matchingRecord: matchingSaving }
+    }
+    
+    return { isDuplicate: false }
+  }
+
+  // Hitta matchande fast utgift baserat på namn (case-insensitive, fuzzy)
+  const findMatchingFixedExpense = (description: string): FixedExpense | undefined => {
+    if (!description) return undefined
+    
+    const normalizedDesc = description.trim().toLowerCase()
+    
+    // 1. Exakt match (case-insensitive)
+    const exactMatch = existingFixedExpenses.find(fe => 
+      fe.name.trim().toLowerCase() === normalizedDesc
+    )
+    if (exactMatch) return exactMatch
+    
+    // 2. Partial match - om beskrivningen innehåller namnet eller vice versa
+    const partialMatch = existingFixedExpenses.find(fe => {
+      const feName = fe.name.trim().toLowerCase()
+      // "ELLEVIO AB" matchar "Ellevio", "BAHNHOF" matchar "Bahnhof Internet"
+      return normalizedDesc.includes(feName) || feName.includes(normalizedDesc)
+    })
+    if (partialMatch) return partialMatch
+    
+    // 3. Fuzzy match - första ordet i beskrivningen matchar första ordet i namn
+    const firstWordDesc = normalizedDesc.split(/[\s,.-]+/)[0]
+    if (firstWordDesc.length >= 4) {  // Minst 4 tecken för att undvika false positives
+      const fuzzyMatch = existingFixedExpenses.find(fe => {
+        const firstWordFe = fe.name.trim().toLowerCase().split(/[\s,.-]+/)[0]
+        return firstWordFe === firstWordDesc || 
+               firstWordFe.startsWith(firstWordDesc) || 
+               firstWordDesc.startsWith(firstWordFe)
+      })
+      if (fuzzyMatch) return fuzzyMatch
+    }
+    
+    return undefined
+  }
+
+  // Hitta matchande inkomst baserat på namn (case-insensitive, fuzzy)
+  const findMatchingIncome = (description: string, amount: number): Income | undefined => {
+    if (!description) return undefined
+    
+    const normalizedDesc = description.trim().toLowerCase()
+    const absAmount = Math.abs(amount)
+    
+    // 1. Exakt match på namn (case-insensitive)
+    const exactMatch = existingIncomes.find(inc => 
+      inc.name.trim().toLowerCase() === normalizedDesc
+    )
+    if (exactMatch) return exactMatch
+    
+    // 2. Partial match - om beskrivningen innehåller namnet eller vice versa
+    const partialMatch = existingIncomes.find(inc => {
+      const incName = inc.name.trim().toLowerCase()
+      return normalizedDesc.includes(incName) || incName.includes(normalizedDesc)
+    })
+    if (partialMatch) return partialMatch
+    
+    // 3. Fuzzy match - första ordet + liknande belopp (±20%)
+    const firstWordDesc = normalizedDesc.split(/[\s,.-]+/)[0]
+    if (firstWordDesc.length >= 3) {
+      const fuzzyMatch = existingIncomes.find(inc => {
+        const firstWordInc = inc.name.trim().toLowerCase().split(/[\s,.-]+/)[0]
+        const amountMatch = Math.abs(inc.amount - absAmount) / Math.max(inc.amount, absAmount) < 0.2
+        return (firstWordInc === firstWordDesc || 
+                firstWordInc.startsWith(firstWordDesc) || 
+                firstWordDesc.startsWith(firstWordInc)) && amountMatch
+      })
+      if (fuzzyMatch) return fuzzyMatch
+    }
+    
+    return undefined
+  }
+
+  // Hitta matchande sparande baserat på namn (case-insensitive, fuzzy)
+  const findMatchingSaving = (description: string, amount: number): Saving | undefined => {
+    if (!description) return undefined
+    
+    const normalizedDesc = description.trim().toLowerCase()
+    const absAmount = Math.abs(amount)
+    
+    // 1. Exakt match på namn (case-insensitive)
+    const exactMatch = existingSavings.find(sav => 
+      sav.name.trim().toLowerCase() === normalizedDesc
+    )
+    if (exactMatch) return exactMatch
+    
+    // 2. Partial match - om beskrivningen innehåller namnet eller vice versa
+    const partialMatch = existingSavings.find(sav => {
+      const savName = sav.name.trim().toLowerCase()
+      return normalizedDesc.includes(savName) || savName.includes(normalizedDesc)
+    })
+    if (partialMatch) return partialMatch
+    
+    // 3. Fuzzy match - första ordet + liknande belopp (±20%)
+    const firstWordDesc = normalizedDesc.split(/[\s,.-]+/)[0]
+    if (firstWordDesc.length >= 3) {
+      const fuzzyMatch = existingSavings.find(sav => {
+        const firstWordSav = sav.name.trim().toLowerCase().split(/[\s,.-]+/)[0]
+        const amountMatch = Math.abs(sav.amount - absAmount) / Math.max(sav.amount, absAmount) < 0.2
+        return (firstWordSav === firstWordDesc || 
+                firstWordSav.startsWith(firstWordDesc) || 
+                firstWordDesc.startsWith(firstWordSav)) && amountMatch
+      })
+      if (fuzzyMatch) return fuzzyMatch
+    }
+    
+    return undefined
   }
 
   // Förhandsgranska mappning
@@ -427,11 +628,53 @@ export function Import() {
       const amount = parseAmount(amountRaw, shouldInvert)
       if (amount === null) errors.push(`Ogiltigt belopp: ${amountRaw}`)
       
-      // Kontrollera om transaktionen redan finns
-      const isDuplicate = date && amount ? checkDuplicate(date, amount, description) : false
+      // Kontrollera om raden redan finns i NÅGON tabell
+      const duplicateCheck = date && amount 
+        ? checkDuplicateAnywhere(date, amount, description) 
+        : { isDuplicate: false }
       
-      // Auto-föreslå typ baserat på belopp (positiv = inkomst, negativ = rörlig utgift)
-      const suggestedType: ImportTargetType = amount && amount > 0 ? 'income' : 'variable'
+      // Auto-föreslå typ baserat på:
+      // 1. Om det är en dubblett - föreslå samma typ som den hittades i
+      // 2. Annars baserat på belopp (positiv = inkomst, negativ = rörlig utgift)
+      let suggestedType: ImportTargetType
+      if (duplicateCheck.isDuplicate && duplicateCheck.duplicateType) {
+        // Mappa duplicateType till ImportTargetType
+        const typeMap: Record<string, ImportTargetType> = {
+          'transaction': 'variable',
+          'income': 'income',
+          'fixed': 'fixed',
+          'savings': 'savings'
+        }
+        suggestedType = typeMap[duplicateCheck.duplicateType] || 'variable'
+      } else {
+        suggestedType = amount && amount > 0 ? 'income' : 'variable'
+      }
+      
+      // Sök efter matchningar baserat på föreslagen typ
+      let matchingIncome: Income | undefined
+      let incomeAction: MatchAction | undefined
+      let matchingSaving: Saving | undefined
+      let savingAction: MatchAction | undefined
+      let matchingFixedExpense: FixedExpense | undefined
+      let fixedExpenseAction: MatchAction | undefined
+      
+      // Om det är en dubblett, sätt matchning och action baserat på duplicateCheck
+      if (duplicateCheck.isDuplicate) {
+        if (duplicateCheck.duplicateType === 'income') {
+          matchingIncome = duplicateCheck.matchingRecord as Income
+          incomeAction = 'skip'
+        } else if (duplicateCheck.duplicateType === 'fixed') {
+          matchingFixedExpense = duplicateCheck.matchingRecord as FixedExpense
+          fixedExpenseAction = 'skip'
+        } else if (duplicateCheck.duplicateType === 'savings') {
+          matchingSaving = duplicateCheck.matchingRecord as Saving
+          savingAction = 'skip'
+        }
+      } else if (suggestedType === 'income' && amount) {
+        // Inte dubblett men kolla ändå för fuzzy match
+        matchingIncome = findMatchingIncome(description, amount)
+        incomeAction = matchingIncome ? 'skip' : 'create'
+      }
       
       return {
         date: date || '',
@@ -440,8 +683,15 @@ export function Import() {
         rawRow: row,
         isValid: errors.length === 0,
         errors,
-        isDuplicate,
+        isDuplicate: duplicateCheck.isDuplicate,
+        duplicateType: duplicateCheck.duplicateType,
         targetType: suggestedType,
+        matchingIncome,
+        incomeAction,
+        matchingSaving,
+        savingAction,
+        matchingFixedExpense,
+        fixedExpenseAction,
       }
     })
 
@@ -473,11 +723,63 @@ export function Import() {
   const changeTargetType = (index: number, newType: ImportTargetType) => {
     setParsedTransactions(prev => {
       const updated = [...prev]
-      updated[index] = { ...updated[index], targetType: newType }
+      const t = updated[index]
+      
+      // Rensa alla matchningar först
+      let newT: ParsedTransaction = { 
+        ...t, 
+        targetType: newType,
+        matchingFixedExpense: undefined,
+        fixedExpenseAction: undefined,
+        matchingIncome: undefined,
+        incomeAction: undefined,
+        matchingSaving: undefined,
+        savingAction: undefined,
+      }
+      
+      // Sök efter matchning beroende på typ
+      if (newType === 'fixed') {
+        const matching = findMatchingFixedExpense(t.description)
+        newT.matchingFixedExpense = matching
+        newT.fixedExpenseAction = matching ? 'update' : 'create'
+      } else if (newType === 'income') {
+        const matching = findMatchingIncome(t.description, t.amount)
+        newT.matchingIncome = matching
+        newT.incomeAction = matching ? 'skip' : 'create'  // Default: hoppa över om match finns (redan importerad)
+      } else if (newType === 'savings') {
+        const matching = findMatchingSaving(t.description, t.amount)
+        newT.matchingSaving = matching
+        newT.savingAction = matching ? 'skip' : 'create'  // Default: hoppa över om match finns
+      }
+      
+      updated[index] = newT
       return updated
     })
     // Om man väljer 'skip', avmarkera för import
     if (newType === 'skip') {
+      setSelectedForImport(prev => {
+        const next = new Set(prev)
+        next.delete(index)
+        return next
+      })
+    }
+  }
+
+  // Ändra matchAction för en transaktion (för alla typer)
+  const changeMatchAction = (index: number, action: MatchAction, type: 'fixed' | 'income' | 'savings') => {
+    setParsedTransactions(prev => {
+      const updated = [...prev]
+      if (type === 'fixed') {
+        updated[index] = { ...updated[index], fixedExpenseAction: action }
+      } else if (type === 'income') {
+        updated[index] = { ...updated[index], incomeAction: action }
+      } else if (type === 'savings') {
+        updated[index] = { ...updated[index], savingAction: action }
+      }
+      return updated
+    })
+    // Om man väljer 'skip', avmarkera för import
+    if (action === 'skip') {
       setSelectedForImport(prev => {
         const next = new Set(prev)
         next.delete(index)
@@ -491,7 +793,34 @@ export function Import() {
     setParsedTransactions(prev => {
       return prev.map((t, i) => {
         if (selectedForImport.has(i) && t.isValid && !t.isDuplicate) {
-          return { ...t, targetType: newType }
+          // Rensa alla matchningar först
+          let newT: ParsedTransaction = { 
+            ...t, 
+            targetType: newType,
+            matchingFixedExpense: undefined,
+            fixedExpenseAction: undefined,
+            matchingIncome: undefined,
+            incomeAction: undefined,
+            matchingSaving: undefined,
+            savingAction: undefined,
+          }
+          
+          // Sök efter matchning beroende på typ
+          if (newType === 'fixed') {
+            const matching = findMatchingFixedExpense(t.description)
+            newT.matchingFixedExpense = matching
+            newT.fixedExpenseAction = matching ? 'update' : 'create'
+          } else if (newType === 'income') {
+            const matching = findMatchingIncome(t.description, t.amount)
+            newT.matchingIncome = matching
+            newT.incomeAction = matching ? 'skip' : 'create'
+          } else if (newType === 'savings') {
+            const matching = findMatchingSaving(t.description, t.amount)
+            newT.matchingSaving = matching
+            newT.savingAction = matching ? 'skip' : 'create'
+          }
+          
+          return newT
         }
         return t
       })
@@ -553,41 +882,77 @@ export function Import() {
             break
             
           case 'income':
-            // Inkomst → incomes-tabellen (månadsvis)
-            const newIncome: NewIncome = {
-              name: t.description,
-              amount: absAmount,
-              notes: `${notes} (${t.date})`,
-              is_active: true,
+            // Inkomst → incomes-tabellen
+            // Kontrollera om vi ska uppdatera befintlig, skapa ny, eller hoppa över
+            if (t.matchingIncome && t.incomeAction === 'update') {
+              // Uppdatera befintlig inkomst med nytt belopp
+              await updateIncome(t.matchingIncome.id, {
+                amount: absAmount,
+                notes: `${t.matchingIncome.notes || ''}\nUppdaterad ${t.date}: ${absAmount} kr`.trim(),
+              })
+              counts.income++
+            } else if (t.incomeAction !== 'skip') {
+              // Skapa ny inkomst (antingen ingen match, eller explicit 'create')
+              const newIncome: NewIncome = {
+                name: t.description,
+                amount: absAmount,
+                notes: `${notes} (${t.date})`,
+                is_active: true,
+              }
+              await createIncome(newIncome)
+              counts.income++
             }
-            await createIncome(newIncome)
-            counts.income++
+            // Om incomeAction === 'skip', gör ingenting (redan importerad)
             break
             
           case 'fixed':
             // Fast utgift → fixed_expenses-tabellen
-            const newFixedExpense: NewFixedExpense = {
-              name: t.description,
-              amount: absAmount,
-              budget: absAmount, // Default: budget = faktiskt belopp
-              notes: `${notes} (${t.date})`,
-              is_active: true,
+            // Kontrollera om vi ska uppdatera befintlig eller skapa ny
+            if (t.matchingFixedExpense && t.fixedExpenseAction === 'update') {
+              // Uppdatera befintlig fast utgift med nytt belopp
+              await updateFixedExpense(t.matchingFixedExpense.id, {
+                amount: absAmount,
+                notes: `${t.matchingFixedExpense.notes || ''}\nUppdaterad ${t.date}: ${absAmount} kr`.trim(),
+              })
+              counts.fixed++
+            } else if (t.fixedExpenseAction !== 'skip') {
+              // Skapa ny fast utgift (antingen ingen match, eller explicit 'create')
+              const newFixedExpense: NewFixedExpense = {
+                name: t.description,
+                amount: absAmount,
+                budget: absAmount, // Default: budget = faktiskt belopp
+                notes: `${notes} (${t.date})`,
+                is_active: true,
+              }
+              await createFixedExpense(newFixedExpense)
+              counts.fixed++
             }
-            await createFixedExpense(newFixedExpense)
-            counts.fixed++
+            // Om fixedExpenseAction === 'skip', gör ingenting
             break
             
           case 'savings':
             // Sparande → savings-tabellen
-            const newSaving: NewSaving = {
-              name: t.description,
-              amount: absAmount,
-              type: 'short', // Default till kortfristigt sparande
-              notes: `${notes} (${t.date})`,
-              is_active: true,
+            // Kontrollera om vi ska uppdatera befintligt, skapa nytt, eller hoppa över
+            if (t.matchingSaving && t.savingAction === 'update') {
+              // Uppdatera befintligt sparande med nytt belopp
+              await updateSaving(t.matchingSaving.id, {
+                amount: absAmount,
+                notes: `${t.matchingSaving.notes || ''}\nUppdaterad ${t.date}: ${absAmount} kr`.trim(),
+              })
+              counts.savings++
+            } else if (t.savingAction !== 'skip') {
+              // Skapa nytt sparande (antingen ingen match, eller explicit 'create')
+              const newSaving: NewSaving = {
+                name: t.description,
+                amount: absAmount,
+                type: 'short', // Default till kortfristigt sparande
+                notes: `${notes} (${t.date})`,
+                is_active: true,
+              }
+              await createSaving(newSaving)
+              counts.savings++
             }
-            await createSaving(newSaving)
-            counts.savings++
+            // Om savingAction === 'skip', gör ingenting (redan importerat)
             break
         }
       }
@@ -1195,6 +1560,7 @@ export function Import() {
                     <TableHead>Beskrivning</TableHead>
                     <TableHead className="text-right">Belopp</TableHead>
                     <TableHead className="w-40">Importera som</TableHead>
+                    <TableHead className="w-56">Matchning</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -1219,8 +1585,17 @@ export function Import() {
                       <TableCell>
                         {t.isValid ? (
                           t.isDuplicate ? (
-                            <Badge variant="outline" className="bg-orange-100 border-orange-300 text-orange-700" title="Denna transaktion finns redan i databasen">
-                              🔄 Dubblett
+                            <Badge 
+                              variant="outline" 
+                              className="bg-orange-100 border-orange-300 text-orange-700" 
+                              title={`Finns redan som ${
+                                t.duplicateType === 'transaction' ? 'rörlig utgift' :
+                                t.duplicateType === 'income' ? 'inkomst' :
+                                t.duplicateType === 'fixed' ? 'fast utgift' :
+                                t.duplicateType === 'savings' ? 'sparande' : 'okänd'
+                              }`}
+                            >
+                              🔄 Finns redan
                             </Badge>
                           ) : (
                             <input
@@ -1270,6 +1645,89 @@ export function Import() {
                           </Select>
                         ) : (
                           <span className="text-slate-400 text-xs">-</span>
+                        )}
+                      </TableCell>
+                      <TableCell onClick={(e) => e.stopPropagation()}>
+                        {t.isValid && !t.isDuplicate && t.targetType === 'fixed' ? (
+                          t.matchingFixedExpense ? (
+                            <div className="space-y-1">
+                              <div className="text-xs text-blue-600 font-medium">
+                                ✓ Matchar: {t.matchingFixedExpense.name}
+                              </div>
+                              <div className="text-xs text-slate-500">
+                                ({formatCurrency(t.matchingFixedExpense.amount)})
+                              </div>
+                              <Select
+                                value={t.fixedExpenseAction || 'update'}
+                                onValueChange={(v) => changeMatchAction(idx, v as MatchAction, 'fixed')}
+                              >
+                                <SelectTrigger className="h-7 text-xs">
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="update">📝 Uppdatera belopp</SelectItem>
+                                  <SelectItem value="create">➕ Skapa ny ändå</SelectItem>
+                                  <SelectItem value="skip">⏭️ Hoppa över</SelectItem>
+                                </SelectContent>
+                              </Select>
+                            </div>
+                          ) : (
+                            <span className="text-xs text-slate-400">Ingen match - skapar ny</span>
+                          )
+                        ) : t.isValid && !t.isDuplicate && t.targetType === 'income' ? (
+                          t.matchingIncome ? (
+                            <div className="space-y-1">
+                              <div className="text-xs text-green-600 font-medium">
+                                ✓ Matchar: {t.matchingIncome.name}
+                              </div>
+                              <div className="text-xs text-slate-500">
+                                ({formatCurrency(t.matchingIncome.amount)})
+                              </div>
+                              <Select
+                                value={t.incomeAction || 'skip'}
+                                onValueChange={(v) => changeMatchAction(idx, v as MatchAction, 'income')}
+                              >
+                                <SelectTrigger className="h-7 text-xs">
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="skip">⏭️ Finns redan</SelectItem>
+                                  <SelectItem value="update">📝 Uppdatera belopp</SelectItem>
+                                  <SelectItem value="create">➕ Skapa ny ändå</SelectItem>
+                                </SelectContent>
+                              </Select>
+                            </div>
+                          ) : (
+                            <span className="text-xs text-slate-400">Ingen match - skapar ny</span>
+                          )
+                        ) : t.isValid && !t.isDuplicate && t.targetType === 'savings' ? (
+                          t.matchingSaving ? (
+                            <div className="space-y-1">
+                              <div className="text-xs text-purple-600 font-medium">
+                                ✓ Matchar: {t.matchingSaving.name}
+                              </div>
+                              <div className="text-xs text-slate-500">
+                                ({formatCurrency(t.matchingSaving.amount)})
+                              </div>
+                              <Select
+                                value={t.savingAction || 'skip'}
+                                onValueChange={(v) => changeMatchAction(idx, v as MatchAction, 'savings')}
+                              >
+                                <SelectTrigger className="h-7 text-xs">
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="skip">⏭️ Finns redan</SelectItem>
+                                  <SelectItem value="update">📝 Uppdatera belopp</SelectItem>
+                                  <SelectItem value="create">➕ Skapa ny ändå</SelectItem>
+                                </SelectContent>
+                              </Select>
+                            </div>
+                          ) : (
+                            <span className="text-xs text-slate-400">Ingen match - skapar ny</span>
+                          )
+                        ) : (
+                          <span className="text-slate-300 text-xs">-</span>
                         )}
                       </TableCell>
                     </TableRow>
